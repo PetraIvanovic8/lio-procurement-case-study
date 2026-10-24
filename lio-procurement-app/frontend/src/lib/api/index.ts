@@ -1,6 +1,11 @@
 'use client';
 
-import { apiFetch, apiFetchObjectUrl, clearToken, setToken } from './client';
+import {
+  apiFetch,
+  apiFetchObjectUrl,
+  clearToken,
+  setToken,
+} from './client';
 import type {
   CommodityGroup,
   OrganizationInvite,
@@ -9,7 +14,7 @@ import type {
   ProcurementRequestWithDetails,
 } from '@/types/database';
 
-export { ApiError, getToken, clearToken } from './client';
+export { ApiError, clearToken, getToken } from './client';
 
 // ============================================================================
 // Types
@@ -45,8 +50,18 @@ export interface MyOrganization {
 // Request fields an org may optionally mark as required (see backend settings).
 export type ConfigurableRequiredField = 'vat_id' | 'department';
 
+export interface CommodityGroupOverrideSetting {
+  required_keywords: string[];
+  alternative_keywords: string[];
+  excluded_keywords?: string[];
+  commodity_group_id: number;
+  max_total_cost: number | null;
+}
+
 export interface OrganizationSettings {
-  required_fields: ConfigurableRequiredField[];
+  required_fields?: ConfigurableRequiredField[];
+  buyer_aliases?: string[];
+  commodity_group_overrides?: CommodityGroupOverrideSetting[];
 }
 
 export interface MembersResponse {
@@ -60,6 +75,15 @@ export interface OrderLineInput {
   amount: number;
   unit: string;
   totalPrice: number;
+  lineType?: string;
+  currency?: string;
+  catalogArticleId?: string;
+}
+
+export interface ExtractionAdjustment {
+  description: string;
+  amount: number;
+  lineType: string;
 }
 
 export interface CreateRequestInput {
@@ -69,8 +93,10 @@ export interface CreateRequestInput {
   vatId: string;
   commodityGroupId: number;
   totalCost: number;
+  currency?: string | null;
   department: string;
   orderLines: OrderLineInput[];
+  adjustments?: ExtractionAdjustment[];
 }
 
 export interface UpdateRequestInput {
@@ -80,8 +106,10 @@ export interface UpdateRequestInput {
   vatId: string;
   commodityGroupId: number;
   totalCost: number;
+  currency?: string | null;
   department: string;
   orderLines: OrderLineInput[];
+  adjustments?: ExtractionAdjustment[];
 }
 
 export interface ExtractedVendorData {
@@ -90,9 +118,12 @@ export interface ExtractedVendorData {
   vatId: string;
   department: string;
   orderLines: OrderLineInput[];
-  totalCost: number;
+  adjustments?: ExtractionAdjustment[];
+  alternatives?: ExtractionAdjustment[];
+  totalCost: number | null;
   commodityGroupId: number | null;
   commodityGroupName: string | null;
+  currency?: string | null;
 }
 
 export interface ExtractionResponse {
@@ -100,6 +131,11 @@ export interface ExtractionResponse {
   data?: ExtractedVendorData;
   error?: string;
   missingFields?: string[];
+  warnings?: string[];
+  overrideApplied?: boolean;
+  overrideReason?: string | null;
+  overrideConflict?: boolean;
+  overrideGroupIds?: number[];
 }
 
 export interface Supplier {
@@ -125,6 +161,10 @@ export interface Article {
   unit: string;
   quantity: string;
   created_at: string;
+}
+
+export interface ArticleSuggestion extends Article {
+  match_score: number;
 }
 
 export interface ArticlePage {
@@ -170,7 +210,7 @@ export interface RequestActivity {
   id: string;
   request_id: string;
   actor_id: string | null;
-  action: 'created' | 'updated' | 'status_changed' | 'approved' | 'rejected' | 'document_attached';
+  action: 'created' | 'updated' | 'status_changed' | 'approved' | 'rejected' | 'auto_approved' | 'document_attached';
   summary: string;
   detail: Record<string, unknown> | null;
   created_at: string;
@@ -314,6 +354,15 @@ export const articles = {
 
   count(): Promise<{ count: number }> {
     return apiFetch('/articles/count');
+  },
+
+  suggestions(
+    description: string,
+    limit = 3,
+    signal?: AbortSignal,
+  ): Promise<ArticleSuggestion[]> {
+    const qs = new URLSearchParams({ description, limit: String(limit) });
+    return apiFetch(`/articles/suggestions?${qs.toString()}`, { signal });
   },
 };
 

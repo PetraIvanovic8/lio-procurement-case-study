@@ -8,6 +8,7 @@ with:
 """
 import logging
 import uuid
+from enum import Enum
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -26,6 +27,7 @@ from app.models import (
     Supplier,
     User,
 )
+from app.schemas.organizations import OrganizationSettings
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +36,79 @@ logger = logging.getLogger(__name__)
 # tenants each have a single admin so the multi-tenant setup is tangible.
 DEMO_PASSWORD = "demo1234"
 
+
+class DemoOrganizationSlug(str, Enum):
+    """Stable identifiers for the organizations created by the demo seed."""
+
+    ACME = "acme"
+    WALMART = "walmart"
+    SCHAEFFLER = "schaeffler"
+    SIEMENS = "siemens"
+    BMW = "bmw"
+
+
+ACME_COMMODITY_GROUP_OVERRIDES = [
+    {
+        "required_keywords": ["software"],
+        "alternative_keywords": [
+            "subscription",
+            "annual",
+            "monthly",
+            "per seat",
+        ],
+        "excluded_keywords": ["perpetual"],
+        "commodity_group_id": 2001,
+        "max_total_cost": 2000,
+    },
+    {
+        "required_keywords": ["saas"],
+        "alternative_keywords": [],
+        "commodity_group_id": 2001,
+        "max_total_cost": 2000,
+    },
+    {
+        "required_keywords": [],
+        "alternative_keywords": ["cable tie", "zip tie", "kabelbinder"],
+        "commodity_group_id": 11,
+    },
+    {
+        "required_keywords": [],
+        "alternative_keywords": ["printer toner", "toner cartridge", "toner", "druckertoner"],
+        "commodity_group_id": 29,
+    },
+]
+
+ACME_BUYER_ALIASES = ["Lio Technologies", "askLio"]
+
 # (org_name, org_slug, [(email, full_name, role), ...])
-ORG_ACCOUNTS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
+ORG_ACCOUNTS: list[
+    tuple[str, DemoOrganizationSlug, list[tuple[str, str, str]]]
+] = [
     (
         "Acme Corp",
-        "acme",
+        DemoOrganizationSlug.ACME,
         [
             ("admin@acme.com", "Alex Admin", "admin"),
             ("buyer@acme.com", "Bea Buyer", "buyer"),
             ("requester@acme.com", "Rene Requester", "requester"),
         ],
     ),
-    ("Walmart", "walmart", [("admin@walmart.com", "Walmart Admin", "admin")]),
-    ("Schaeffler", "schaeffler", [("admin@schaeffler.com", "Schaeffler Admin", "admin")]),
-    ("Siemens", "siemens", [("admin@siemens.com", "Siemens Admin", "admin")]),
-    ("BMW", "bmw", [("admin@bmw.com", "BMW Admin", "admin")]),
+    (
+        "Walmart",
+        DemoOrganizationSlug.WALMART,
+        [("admin@walmart.com", "Walmart Admin", "admin")],
+    ),
+    (
+        "Schaeffler",
+        DemoOrganizationSlug.SCHAEFFLER,
+        [("admin@schaeffler.com", "Schaeffler Admin", "admin")],
+    ),
+    (
+        "Siemens",
+        DemoOrganizationSlug.SIEMENS,
+        [("admin@siemens.com", "Siemens Admin", "admin")],
+    ),
+    ("BMW", DemoOrganizationSlug.BMW, [("admin@bmw.com", "BMW Admin", "admin")]),
 ]
 
 
@@ -141,12 +201,22 @@ def seed_organizations_and_accounts(db: Session) -> tuple[int, int]:
     orgs_created = 0
     users_created = 0
     for org_name, org_slug, accounts in ORG_ACCOUNTS:
-        org = db.scalar(select(Organization).where(Organization.slug == org_slug))
+        org = db.scalar(
+            select(Organization).where(Organization.slug == org_slug.value)
+        )
         if org is None:
-            org = Organization(name=org_name, slug=org_slug)
+            org = Organization(name=org_name, slug=org_slug.value)
             db.add(org)
             db.flush()
             orgs_created += 1
+        if org_slug is DemoOrganizationSlug.ACME:
+            settings = dict(org.settings or {})
+            # Remove settings fields retired during the case-study scope cut
+            # before validating the current strict settings contract.
+            settings.pop("supplier_aliases", None)
+            settings.setdefault("buyer_aliases", ACME_BUYER_ALIASES)
+            settings.setdefault("commodity_group_overrides", ACME_COMMODITY_GROUP_OVERRIDES)
+            org.settings = OrganizationSettings.model_validate(settings).model_dump()
         for email, full_name, role in accounts:
             if db.scalar(select(User).where(User.email == email)) is not None:
                 continue
@@ -171,7 +241,11 @@ def seed(db: Session) -> dict[str, int]:
     """
     orgs_created, users_created = seed_organizations_and_accounts(db)
     db.flush()
-    dev_org = db.scalar(select(Organization).where(Organization.slug == "acme"))
+    dev_org = db.scalar(
+        select(Organization).where(
+            Organization.slug == DemoOrganizationSlug.ACME.value
+        )
+    )
     dev_org_id = dev_org.id if dev_org else None
     counts = {
         "commodity_groups": seed_commodity_groups(db),

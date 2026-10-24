@@ -5,9 +5,21 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.deps import get_current_membership
 from app.db.session import get_db
 from app.models import Article, OrganizationMember
-from app.schemas.articles import ArticleOut, ArticlePage
+from app.schemas.articles import ArticleOut, ArticlePage, ArticleSuggestion
+from app.services.article_suggestions import suggest_articles
 
 router = APIRouter(prefix="/articles", tags=["articles"])
+
+
+@router.get("/suggestions", response_model=list[ArticleSuggestion])
+def article_suggestions(
+    description: str = Query(..., min_length=2),
+    limit: int = Query(default=3, ge=1, le=10),
+    membership: OrganizationMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+) -> list[ArticleSuggestion]:
+    """Return negotiated catalog matches for one order-line description."""
+    return suggest_articles(db, membership.organization_id, description, limit)
 
 
 @router.get("", response_model=ArticlePage)

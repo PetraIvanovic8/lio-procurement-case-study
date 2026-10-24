@@ -14,7 +14,10 @@ interface DashboardNavProps {
   role: MemberRole | null;
 }
 
-export default function DashboardNav({ user, role }: DashboardNavProps) {
+export default function DashboardNav({
+  user,
+  role,
+}: DashboardNavProps) {
   const pathname = usePathname();
   const router = useRouter();
 

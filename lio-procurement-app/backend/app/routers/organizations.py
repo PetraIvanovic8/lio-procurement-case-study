@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.deps import get_current_membership, get_current_user, require_org_admin
 from app.db.session import get_db
 from app.models import (
+    CommodityGroup,
     Organization,
     OrganizationInvite,
     OrganizationMember,
@@ -39,6 +40,14 @@ def create_organization(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> MyOrganizationOut:
+    existing_membership = db.scalar(
+        select(OrganizationMember).where(OrganizationMember.user_id == user.id)
+    )
+    if existing_membership is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You are already a member of an organization.",
+        )
     existing = db.scalar(select(Organization).where(Organization.slug == payload.slug))
     if existing is not None:
         raise HTTPException(
@@ -95,9 +104,31 @@ def update_settings(
     db: Session = Depends(get_db),
 ) -> OrganizationSettings:
     org = db.get(Organization, membership.organization_id)
-    org.settings = payload.model_dump()
+    settings = dict(org.settings or {})
+    for field_name in payload.model_fields_set:
+        settings[field_name] = getattr(payload, field_name)
+    merged_payload = OrganizationSettings.model_validate(settings)
+    configured_group_ids = {
+        override.commodity_group_id
+        for override in merged_payload.commodity_group_overrides
+    }
+    existing_group_ids = set(
+        db.scalars(
+            select(CommodityGroup.id).where(CommodityGroup.id.in_(configured_group_ids))
+        )
+    ) if configured_group_ids else set()
+    unknown_group_ids = configured_group_ids - existing_group_ids
+    if unknown_group_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Unknown commodity group IDs in override configuration: "
+                + ", ".join(str(group_id) for group_id in sorted(unknown_group_ids))
+            ),
+        )
+    org.settings = merged_payload.model_dump()
     db.commit()
-    return payload
+    return merged_payload
 
 
 @router.get("/me/members", response_model=MembersResponse)
@@ -253,6 +284,15 @@ def accept_invite(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This invite was sent to a different email address.",
+        )
+
+    existing_membership = db.scalar(
+        select(OrganizationMember).where(OrganizationMember.user_id == user.id)
+    )
+    if existing_membership is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You are already a member of an organization.",
         )
 
     db.add(

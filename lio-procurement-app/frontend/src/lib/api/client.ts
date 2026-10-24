@@ -24,6 +24,7 @@ export function clearToken(): void {
   window.localStorage.removeItem(TOKEN_KEY);
 }
 
+
 export class ApiError extends Error {
   status: number;
 
@@ -53,6 +54,7 @@ interface RequestOptions {
   method?: string;
   body?: unknown;
   formData?: FormData;
+  signal?: AbortSignal;
 }
 
 export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -74,6 +76,7 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     method: options.method || (body ? 'POST' : 'GET'),
     headers,
     body,
+    signal: options.signal,
   });
 
   if (!response.ok) {

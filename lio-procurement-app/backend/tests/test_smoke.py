@@ -4,6 +4,7 @@ Run with: python -m pytest tests/ -q   (or plainly: python tests/test_smoke.py)
 """
 import io
 import uuid
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
@@ -197,8 +198,8 @@ def test_full_user_journey():
             ).all()
             return [a.action for a in rows]
 
-    # created + status_changed so far
-    assert _activity_actions() == ["created", "status_changed"]
+    # created + auto_approved + status_changed so far
+    assert _activity_actions() == ["created", "auto_approved", "status_changed"]
 
     # same-status update does NOT add activity
     client.patch(
@@ -206,7 +207,7 @@ def test_full_user_journey():
         json={"status": "in_progress"},
         headers=_auth(owner_token),
     )
-    assert _activity_actions() == ["created", "status_changed"]
+    assert _activity_actions() == ["created", "auto_approved", "status_changed"]
 
     # invalid status -> 422
     r = client.patch(
@@ -397,8 +398,8 @@ def test_pdf_parse():
         files={"file": ("offer.pdf", buf.getvalue(), "application/pdf")},
         headers=_auth(token),
     )
-    assert r.status_code == 200, r.text
-    assert "text" in r.json()  # blank page -> empty text, but parses fine
+    assert r.status_code == 422, r.text
+    assert "no extractable text" in r.json()["detail"]
 
     # non-PDF rejected
     r = client.post(
@@ -442,8 +443,8 @@ def test_activity_log_and_document():
     r = client.put(f"/requests/{rid}", json=updated, headers=_auth(admin))
     assert r.status_code == 200, r.text
 
-    # approve, then a status change
-    client.patch(f"/requests/{rid}/approval", json={"decision": "approved"}, headers=_auth(admin))
+    # The request remains auto-approved after an edit below the threshold.
+    assert client.get(f"/requests/{rid}", headers=_auth(admin)).json()["approval_status"] == "approved"
     client.patch(f"/requests/{rid}/status", json={"status": "closed"}, headers=_auth(admin))
 
     # attach a PDF
@@ -463,7 +464,7 @@ def test_activity_log_and_document():
     assert r.status_code == 200
     actions = [a["action"] for a in r.json()]
     assert set(actions) == {
-        "created", "updated", "approved", "status_changed", "document_attached"
+        "created", "updated", "auto_approved", "status_changed", "document_attached"
     }
     updated_entry = next(a for a in r.json() if a["action"] == "updated")
     assert set(updated_entry["detail"]["changed_fields"]) == {
@@ -479,9 +480,22 @@ def test_activity_log_and_document():
     client.delete(f"/requests/{rid}", headers=_auth(admin))
 
 
-def test_extraction_without_api_key():
+def test_extraction_without_api_key(monkeypatch):
+    """Return a clean error envelope when AI extraction is unconfigured."""
+    from app.core.config import settings
+
+    # Keep this test independent from a developer's local .env and never make
+    # an external OpenAI call as part of the backend test suite.
+    monkeypatch.setattr(settings, "openai_api_key", None)
+
     r = client.post("/auth/signup", json={"email": "ex@example.com", "password": "secret123"})
     token = r.json()["access_token"]
+    organization = client.post(
+        "/organizations",
+        json={"name": "Extraction Co", "slug": "extraction-co"},
+        headers=_auth(token),
+    )
+    assert organization.status_code == 201, organization.text
 
     r = client.post("/extraction", json={"text": "Quote No. 123"}, headers=_auth(token))
     assert r.status_code == 200
@@ -496,6 +510,136 @@ def test_extraction_without_api_key():
     assert r.json()["success"] is False
 
 
+def test_acme_extraction_applies_commodity_override(monkeypatch):
+    """The authenticated Acme extraction path applies customer rules."""
+    from app.core.config import settings
+    from app.services import extraction as extraction_service
+
+    class FakeCompletions:
+        """Minimal OpenAI client surface used by the extraction service."""
+
+        def create(self, **_kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=(
+                                '{"title":"Software subscription renewal",'
+                                '"vendorName":"Example Vendor", "vatId":"12-3456789",'
+                                '"department":"IT", "orderLines":[],'
+                                '"totalCost":100.0, "commodityGroupId":31,'
+                                '"commodityGroupName":"Software"}'
+                            )
+                        )
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        """Fake client that avoids network access in the endpoint test."""
+
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(extraction_service, "OpenAI", FakeOpenAI)
+
+    token = client.post(
+        "/auth/signin", json={"email": "admin@acme.com", "password": "demo1234"}
+    ).json()["access_token"]
+    response = client.post(
+        "/extraction",
+        json={"text": "Software subscription renewal"},
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"]["commodityGroupId"] == 2001
+    assert body["data"]["commodityGroupName"] == "Office Supplies"
+    assert body["overrideApplied"] is True
+    assert body["overrideReason"]
+
+
+def test_extraction_accepts_null_optional_fields_and_reports_missing(monkeypatch):
+    """A missing optional document field should not fail the whole extraction."""
+    from app.core.config import settings
+    from app.services import extraction as extraction_service
+
+    class FakeCompletions:
+        def create(self, **_kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=(
+                                '{"title":"Grinding machine",'
+                                '"vendorName":"Hartwell Industrial Tools, Inc.",'
+                                '"vatId":null,"department":null,"orderLines":[],'
+                                '"totalCost":18402.50,"commodityGroupId":15,'
+                                '"commodityGroupName":"Office Equipment"}'
+                            )
+                        )
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(extraction_service, "OpenAI", FakeOpenAI)
+
+    token = client.post(
+        "/auth/signin", json={"email": "admin@acme.com", "password": "demo1234"}
+    ).json()["access_token"]
+    response = client.post(
+        "/extraction", json={"text": "Hartwell grinding machine quote"}, headers=_auth(token)
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"]["vatId"] is None
+    assert body["data"]["department"] is None
+    assert "Tax ID" in body["missingFields"]
+    assert "Department" in body["missingFields"]
+
+
+def test_manual_acme_request_rejects_override_deviation():
+    """Manual request creation cannot bypass a non-negotiable Acme rule."""
+    token = client.post(
+        "/auth/signin", json={"email": "admin@acme.com", "password": "demo1234"}
+    ).json()["access_token"]
+    response = client.post(
+        "/requests",
+        json={
+            "requestorName": "Alex Admin",
+            "titleShortDescription": "Printer toner",
+            "vendorName": "Example Vendor",
+            "vatId": "12-3456789",
+            "commodityGroupId": 31,
+            "totalCost": 150.0,
+            "department": "IT",
+            "orderLines": [
+                {
+                    "positionDescription": "Printer toner cartridge",
+                    "unitPrice": 150.0,
+                    "amount": 1,
+                    "unit": "piece",
+                    "totalPrice": 150.0,
+                }
+            ],
+        },
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 422
+    assert "violates an organization rule" in response.json()["detail"]
+
+
 def test_commodity_groups_expanded():
     r = client.post("/auth/signup", json={"email": "cg@example.com", "password": "secret123"})
     token = r.json()["access_token"]
@@ -508,6 +652,18 @@ def test_commodity_groups_expanded():
     # ids contiguous from 1; first one matches the original taxonomy
     assert groups[0] == {"id": 1, "category": "General Services", "name": "Accommodation Rentals"}
     assert len({g["category"] for g in groups}) >= 20
+
+    acme_token = client.post(
+        "/auth/signin", json={"email": "admin@acme.com", "password": "demo1234"}
+    ).json()["access_token"]
+    acme_groups = client.get(
+        "/commodity-groups", headers=_auth(acme_token)
+    ).json()
+    assert {
+        "id": 2001,
+        "category": "Office & Administration",
+        "name": "Office Supplies",
+    } in acme_groups
 
     # Every leaf name belongs to exactly one category.
     by_name: dict[str, set[str]] = {}
@@ -595,6 +751,48 @@ def test_articles_catalog_paginated_and_searchable():
     other = _signin("admin@walmart.com")
     assert client.get("/articles/count", headers=_auth(other)).json()["count"] == 0
     assert client.get("/articles", headers=_auth(other)).json()["total"] == 0
+
+
+def test_article_suggestions_are_ranked_and_tenant_scoped():
+    token = _signin("admin@acme.com")
+
+    r = client.get(
+        "/articles/suggestions?description=docking%20station%20USB-C&limit=3",
+        headers=_auth(token),
+    )
+    assert r.status_code == 200, r.text
+    suggestions = r.json()
+    assert 1 <= len(suggestions) <= 3
+    assert suggestions[0]["description"].startswith("Docking station USB-C")
+    assert suggestions[0]["supplier_name"]
+    assert suggestions[0]["unit_price"]
+    assert suggestions[0]["match_score"] >= 0.65
+
+    # A small typo should still find the negotiated article through the fuzzy
+    # component of the hybrid matcher.
+    r = client.get(
+        "/articles/suggestions?description=dokin%20staton%20USB-C",
+        headers=_auth(token),
+    )
+    assert r.status_code == 200
+    assert r.json()[0]["description"].startswith("Docking station USB-C")
+
+    # Low-confidence descriptions do not produce a potentially misleading price.
+    r = client.get(
+        "/articles/suggestions?description=quantum%20garden%20sprocket",
+        headers=_auth(token),
+    )
+    assert r.status_code == 200
+    assert r.json() == []
+
+    # Suggestions use the same organization boundary as the catalog endpoint.
+    other = _signin("admin@walmart.com")
+    r = client.get(
+        "/articles/suggestions?description=docking%20station",
+        headers=_auth(other),
+    )
+    assert r.status_code == 200
+    assert r.json() == []
 
 
 def test_seed_is_idempotent():
@@ -700,6 +898,34 @@ def test_approval_flow_with_roles():
     assert r.status_code == 200
     assert r.json()["approval_status"] == "rejected"
 
+    # Editing a rejected request below the threshold must not silently
+    # re-approve it; a rejection remains a final buyer decision.
+    rejected_update = {
+        "requestorName": "Rene Requester",
+        "title": "Smaller laptops",
+        "vendorName": "TechSupply",
+        "vatId": "99-9999999",
+        "commodityGroupId": 31,
+        "totalCost": 1400.0,
+        "department": "Engineering",
+        "orderLines": [
+            {
+                "positionDescription": "Laptop",
+                "unitPrice": 1400,
+                "amount": 1,
+                "unit": "pc",
+                "totalPrice": 1400,
+            }
+        ],
+    }
+    r = client.put(
+        f"/requests/{second_id}",
+        json=rejected_update,
+        headers=_auth(requester),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["approval_status"] == "rejected"
+
     # buyers cannot touch org settings (admin-only)
     assert (
         client.patch(
@@ -730,7 +956,11 @@ def test_org_settings_required_fields():
     # Default settings: nothing extra required.
     r = client.get("/organizations/me/settings", headers=_auth(token))
     assert r.status_code == 200
-    assert r.json() == {"required_fields": []}
+    assert r.json() == {
+        "required_fields": [],
+        "buyer_aliases": [],
+        "commodity_group_overrides": [],
+    }
 
     base_payload = {
         "requestorName": "S", "titleShortDescription": "T", "vendorName": "V",

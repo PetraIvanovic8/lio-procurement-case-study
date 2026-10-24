@@ -27,3 +27,9 @@ class ArticlePage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class ArticleSuggestion(ArticleOut):
+    """An article match with the score used to decide whether to show it."""
+
+    match_score: float

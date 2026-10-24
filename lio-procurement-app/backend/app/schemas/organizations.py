@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 MemberRole = Literal["admin", "buyer", "requester"]
 
@@ -21,6 +21,35 @@ class OrganizationSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     required_fields: list[ConfigurableRequiredField] = Field(default_factory=list)
+    buyer_aliases: list[str] = Field(default_factory=list)
+    commodity_group_overrides: list["CommodityGroupOverride"] = Field(
+        default_factory=list
+    )
+
+class CommodityGroupOverride(BaseModel):
+    """A tenant rule that maps procurement text to a commodity group."""
+
+    required_keywords: list[str] = Field(default_factory=list)
+    alternative_keywords: list[str] = Field(default_factory=list)
+    excluded_keywords: list[str] = Field(default_factory=list)
+    commodity_group_id: int = Field(gt=0)
+    max_total_cost: float | None = Field(default=None, ge=0)
+
+    @field_validator("required_keywords", "alternative_keywords", "excluded_keywords")
+    @classmethod
+    def normalize_keywords(cls, values: list[str]) -> list[str]:
+        """Trim configured keywords and reject blank entries."""
+        normalized = [value.strip().casefold() for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("Override keywords cannot be empty")
+        return normalized
+
+    @model_validator(mode="after")
+    def require_match_keywords(self) -> "CommodityGroupOverride":
+        """Prevent an override that would match every procurement request."""
+        if not self.required_keywords and not self.alternative_keywords:
+            raise ValueError("At least one override keyword is required")
+        return self
 
 
 class OrganizationCreate(BaseModel):

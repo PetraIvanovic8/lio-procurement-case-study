@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 
 from app.core.deps import get_current_user
 from app.schemas.extraction import PdfParseResponse
-from app.services.pdf import extract_text
+from app.services.pdf import PdfExtractionError, extract_text
 
 router = APIRouter(prefix="/pdf", tags=["pdf"])
 
@@ -25,10 +25,24 @@ async def parse_pdf(file: UploadFile) -> PdfParseResponse:
 
     try:
         text = extract_text(pdf_bytes)
+    except PdfExtractionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
     except Exception:  # noqa: BLE001 — mirror the original catch-all
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Failed to parse PDF",
+        )
+
+    if not text.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "PDF contains no extractable text. It may be scanned or image-only; "
+                "OCR support is not enabled yet."
+            ),
         )
 
     return PdfParseResponse(text=text)

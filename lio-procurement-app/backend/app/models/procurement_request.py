@@ -49,7 +49,7 @@ class ProcurementRequest(Base, TimestampMixin):
     # Status tracking
     status: Mapped[str] = mapped_column(String, nullable=False, default="open", index=True)
 
-    # Approval: every request needs sign-off by a buyer or admin.
+    # Approval: larger requests need sign-off; smaller requests may be auto-approved.
     approval_status: Mapped[str] = mapped_column(
         String, nullable=False, default="pending", index=True
     )
@@ -62,6 +62,8 @@ class ProcurementRequest(Base, TimestampMixin):
 
     # Financial
     total_cost: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    adjustments: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
 
     # Multi-tenancy (added in migration 003, nullable for backward compatibility)
     organization_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -96,6 +98,9 @@ class OrderLine(Base, CreatedAtMixin):
     unit: Mapped[str] = mapped_column(Text, nullable=False)
     total_price: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     line_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    catalog_article_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("articles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     request: Mapped["ProcurementRequest"] = relationship(back_populates="order_lines")
 

@@ -2005,4 +2005,5 @@ COMMODITY_GROUPS: list[tuple[int, str, str]] = [
     (1998, 'Automotive & Fleet', 'Fuel Card Program — On-site'),
     (1999, 'Automotive & Fleet', 'Vehicle Leasing — On-site'),
     (2000, 'Automotive & Fleet', 'Tire Fitting — On-site'),
+    (2001, 'Office & Administration', 'Office Supplies'),
 ]
