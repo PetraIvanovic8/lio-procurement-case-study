@@ -27,6 +27,8 @@ frontend/.eslintcache
 *.sqlite
 *.sqlite3
 uploads/
+lio-test-quotes/
+lio-test-quotes.zip
 
 # Logs
 *.log

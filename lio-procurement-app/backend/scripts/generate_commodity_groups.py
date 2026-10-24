@@ -16,7 +16,11 @@ variants are exhausted — add items/variants to go higher.
 import sys
 from pathlib import Path
 
-TARGET_DEFAULT = 2000
+TARGET_DEFAULT = 2001
+
+# Customer-specific reference data is appended after the generated taxonomy so
+# existing IDs remain stable when Acme's accounting rules add a new group.
+CUSTOMER_SPECIFIC_GROUPS = [("Office & Administration", "Office Supplies")]
 
 # The original 50 (ids 1-50) — kept verbatim so this file stays consistent with
 # migration 0001.
@@ -216,15 +220,16 @@ def generate(target: int) -> list[tuple[int, str, str]]:
     result: list[tuple[str, str]] = list(ORIGINAL_50)
     seen = {name.lower() for _, name in ORIGINAL_50}
 
+    generation_target = max(0, target - len(CUSTOMER_SPECIFIC_GROUPS))
     max_depth = 1 + max(len(pool) for pool in VARIANT_POOLS.values())
     # Depth 0 emits all base items (one per family, balanced across categories),
     # then each subsequent depth adds the next sibling variant — so we grow
     # breadth-first and keep categories balanced.
     for depth in range(max_depth):
-        if len(result) >= target:
+        if len(result) >= generation_target:
             break
         for category, kind, item in families:
-            if len(result) >= target:
+            if len(result) >= generation_target:
                 break
             if depth == 0:
                 name = item
@@ -239,6 +244,7 @@ def generate(target: int) -> list[tuple[int, str, str]]:
             seen.add(key)
             result.append((category, name))
 
+    result.extend(CUSTOMER_SPECIFIC_GROUPS[: max(0, target - len(result))])
     return [(i + 1, cat, name) for i, (cat, name) in enumerate(result)]
 
 

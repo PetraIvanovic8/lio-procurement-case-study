@@ -47,7 +47,7 @@ export default function OrganizationPage() {
       ]);
       setMembers(result.members);
       setInvites(result.invites);
-      setRequiredFields(settings.required_fields);
+      setRequiredFields(settings.required_fields || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load organization');
     }
@@ -104,7 +104,7 @@ export default function OrganizationPage() {
     setSuccess('');
     try {
       const saved = await api.organizations.updateSettings({ required_fields: next });
-      setRequiredFields(saved.required_fields);
+      setRequiredFields(saved.required_fields || []);
       setSuccess('Settings updated');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update settings');
@@ -292,6 +292,7 @@ export default function OrganizationPage() {
               );
             })}
           </div>
+
         </div>
       )}
     </div>

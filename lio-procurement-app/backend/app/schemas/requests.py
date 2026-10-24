@@ -14,10 +14,23 @@ ApprovalStatus = Literal["pending", "approved", "rejected"]
 
 class OrderLineIn(BaseModel):
     position_description: str = Field(alias="positionDescription")
-    unit_price: float = Field(alias="unitPrice")
-    amount: float
+    unit_price: float = Field(alias="unitPrice", ge=0, allow_inf_nan=False)
+    amount: float = Field(gt=0, allow_inf_nan=False)
     unit: str
-    total_price: float = Field(alias="totalPrice")
+    total_price: float = Field(alias="totalPrice", ge=0, allow_inf_nan=False)
+    catalog_article_id: uuid.UUID | None = Field(default=None, alias="catalogArticleId")
+
+
+class AdjustmentIn(BaseModel):
+    """Validated non-item quote adjustment supplied with a request."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    description: str = Field(min_length=1)
+    amount: float = Field(allow_inf_nan=False)
+    line_type: Literal["shipping", "discount", "fee", "tax"] = Field(
+        alias="lineType"
+    )
 
 
 class RequestCreate(BaseModel):
@@ -26,9 +39,11 @@ class RequestCreate(BaseModel):
     vendor_name: str = Field(alias="vendorName")
     vat_id: str | None = Field(default=None, alias="vatId")
     commodity_group_id: int = Field(alias="commodityGroupId")
-    total_cost: float = Field(alias="totalCost")
+    total_cost: float = Field(alias="totalCost", ge=0, allow_inf_nan=False)
+    currency: str | None = None
     department: str | None = None
     order_lines: list[OrderLineIn] = Field(alias="orderLines", min_length=1)
+    adjustments: list[AdjustmentIn] = Field(default_factory=list)
 
 
 class RequestUpdate(BaseModel):
@@ -37,9 +52,11 @@ class RequestUpdate(BaseModel):
     vendor_name: str = Field(alias="vendorName")
     vat_id: str | None = Field(default=None, alias="vatId")
     commodity_group_id: int = Field(alias="commodityGroupId")
-    total_cost: float = Field(alias="totalCost")
+    total_cost: float = Field(alias="totalCost", ge=0, allow_inf_nan=False)
+    currency: str | None = None
     department: str | None = None
     order_lines: list[OrderLineIn] = Field(alias="orderLines")
+    adjustments: list[AdjustmentIn] = Field(default_factory=list)
 
 
 class StatusUpdate(BaseModel):
@@ -74,6 +91,7 @@ class OrderLineOut(BaseModel):
     total_price: float
     line_order: int
     created_at: datetime
+    catalog_article_id: uuid.UUID | None
 
 
 class RequestActivityOut(BaseModel):
@@ -106,9 +124,11 @@ class RequestOut(BaseModel):
     approved_by: uuid.UUID | None
     approved_at: datetime | None
     total_cost: float | None
+    currency: str | None
     created_at: datetime
     updated_at: datetime
     order_lines: list[OrderLineOut]
+    adjustments: list[dict]
     # Serialized as ``commodity_groups`` (the join key the frontend renders) but
     # read from the ORM's ``commodity_group`` relationship.
     commodity_groups: CommodityGroupOut | None = Field(

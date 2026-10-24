@@ -41,6 +41,7 @@ export default function RequestDetailPage() {
   const [form, setForm] = useState({
     requestorName: '', title: '', vendorName: '', vatId: '', department: '',
     commodityGroupId: null as number | null, totalCost: 0,
+    currency: null as string | null,
   });
 
   const load = async () => {
@@ -128,6 +129,7 @@ export default function RequestDetailPage() {
       department: request.department || '',
       commodityGroupId: request.commodity_group_id,
       totalCost: request.total_cost || 0,
+      currency: request.currency,
     });
     setEditing(true);
   };
@@ -143,13 +145,16 @@ export default function RequestDetailPage() {
         vatId: form.vatId,
         commodityGroupId: form.commodityGroupId || 0,
         totalCost: form.totalCost,
+        currency: form.currency,
         department: form.department,
+        adjustments: request.adjustments || [],
         orderLines: (request.order_lines || []).map((l) => ({
           positionDescription: l.position_description,
           unitPrice: l.unit_price,
           amount: l.amount,
           unit: l.unit,
           totalPrice: l.total_price,
+          catalogArticleId: l.catalog_article_id || undefined,
         })),
       });
       setEditing(false);

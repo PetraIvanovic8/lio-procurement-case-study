@@ -2,7 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { auth, organizations, type AuthUser, type MemberRole } from '@/lib/api';
+import {
+  auth,
+  organizations,
+  type AuthUser,
+  type MemberRole,
+} from '@/lib/api';
 import DashboardNav from './components/DashboardNav';
 
 export default function DashboardLayout({
@@ -51,7 +56,10 @@ export default function DashboardLayout({
 
   return (
     <div className="min-h-screen bg-canvas">
-      <DashboardNav user={user} role={role} />
+      <DashboardNav
+        user={user}
+        role={role}
+      />
       <main className="pt-16">
         {children}
       </main>

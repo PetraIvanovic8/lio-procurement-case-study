@@ -1,3 +1,4 @@
+import math
 import uuid
 from datetime import datetime, timezone
 
@@ -5,10 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, sta
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.core.deps import get_current_membership, require_buyer_or_admin
 from app.db.session import get_db
 from app.models import (
     CommodityGroup,
+    Article,
     OrderLine,
     Organization,
     OrganizationMember,
@@ -24,10 +27,23 @@ from app.schemas.requests import (
     RequestUpdate,
     StatusUpdate,
 )
+from app.schemas.organizations import OrganizationSettings
+from app.services.commodity_overrides import matching_overrides
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
 MAX_PDF_BYTES = 10 * 1024 * 1024
+
+_UNIT_ALIASES = {
+    "ea": "piece",
+    "each": "piece",
+    "pc": "piece",
+    "pcs": "piece",
+    "piece": "piece",
+    "pieces": "piece",
+    "license": "license",
+    "licenses": "license",
+}
 
 # Human-readable labels for the fields we track in the activity log.
 _FIELD_LABELS = {
@@ -78,6 +94,141 @@ def _validate_commodity_group(db: Session, commodity_group_id: int) -> None:
         )
 
 
+def _canonical_unit(value: str) -> str:
+    """Normalize common quote/catalog unit spellings before comparison."""
+    normalized = value.casefold().strip()
+    return _UNIT_ALIASES.get(normalized, normalized)
+
+
+def _validate_catalog_articles(
+    db: Session, organization_id: uuid.UUID, payload: RequestCreate | RequestUpdate
+) -> None:
+    """Validate catalog ownership and negotiated values supplied by the client."""
+    article_ids = {
+        line.catalog_article_id for line in payload.order_lines if line.catalog_article_id
+    }
+    if not article_ids:
+        return
+    articles = db.scalars(
+        select(Article).where(
+            Article.id.in_(article_ids), Article.organization_id == organization_id
+        )
+    ).all()
+    articles_by_id = {article.id: article for article in articles}
+    invalid_ids = article_ids - articles_by_id.keys()
+    if invalid_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="One or more selected catalog articles are not in your organization catalog.",
+        )
+    for line in payload.order_lines:
+        if not line.catalog_article_id:
+            continue
+        article = articles_by_id[line.catalog_article_id]
+        if not math.isclose(float(line.unit_price), float(article.unit_price), abs_tol=0.01):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Line '{line.position_description}' must use the negotiated catalog "
+                    f"price of {article.unit_price}."
+                ),
+            )
+        if _canonical_unit(line.unit) != _canonical_unit(article.unit):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Line '{line.position_description}' must use catalog unit "
+                    f"'{article.unit}'."
+                ),
+            )
+        if payload.currency and payload.currency.casefold() != article.currency.casefold():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Catalog article currency '{article.currency}' does not match "
+                    f"the request currency '{payload.currency}'."
+                ),
+            )
+
+
+def _authoritative_total(payload: RequestCreate | RequestUpdate) -> float:
+    """Calculate the request total from validated lines and quote adjustments."""
+    line_total = 0.0
+    for line in payload.order_lines:
+        expected = line.unit_price * line.amount
+        if not math.isclose(line.total_price, expected, abs_tol=0.02):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Line '{line.position_description}' total must equal unit price "
+                    "multiplied by quantity."
+                ),
+            )
+        line_total += expected
+    adjustment_total = sum(adjustment.amount for adjustment in payload.adjustments)
+    total = round(line_total + adjustment_total, 2)
+    if not math.isfinite(total) or total < 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="The calculated request total must be a non-negative finite number.",
+        )
+    return total
+
+
+def _approval_for_total(total_cost: float) -> tuple[str, datetime | None]:
+    """Return the approval state for an authoritative request total.
+
+    The threshold is intentionally strict: a request exactly at the configured
+    amount still requires buyer approval because the requirement says below.
+    """
+    if total_cost < settings.auto_approval_threshold:
+        return "approved", datetime.now(timezone.utc)
+    return "pending", None
+
+
+def _enforce_commodity_overrides(
+    db: Session,
+    organization_id: uuid.UUID,
+    payload: RequestCreate | RequestUpdate,
+    total_cost: float,
+) -> None:
+    """Reject a request that violates one of the organization's fixed rules."""
+    org = db.get(Organization, organization_id)
+    settings = OrganizationSettings.model_validate((org.settings or {}) if org else {})
+    text = " ".join(
+        [payload.title, *(line.position_description for line in payload.order_lines)]
+    )
+    matches = matching_overrides(text, total_cost, settings.commodity_group_overrides)
+    matched_group_ids = {match.commodity_group_id for match in matches}
+    if len(matches) > 1 and payload.commodity_group_id not in matched_group_ids:
+        group_names = db.scalars(
+            select(CommodityGroup.name).where(CommodityGroup.id.in_(matched_group_ids))
+        ).all()
+        available_groups = ", ".join(sorted(group_names)) or ", ".join(
+            str(group_id) for group_id in sorted(matched_group_ids)
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "This request matches multiple commodity-group rules. "
+                f"Select one of: {available_groups}."
+            ),
+        )
+    if len(matches) == 1 and payload.commodity_group_id != matches[0].commodity_group_id:
+        group_name = db.scalar(
+            select(CommodityGroup.name).where(
+                CommodityGroup.id == matches[0].commodity_group_id
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "The selected commodity group violates an organization rule. "
+                f"Use {group_name or matches[0].commodity_group_id}."
+            ),
+        )
+
+
 def _enforce_required_fields(
     db: Session, organization_id: uuid.UUID, payload: RequestCreate | RequestUpdate
 ) -> None:
@@ -95,7 +246,7 @@ def _enforce_required_fields(
 def _log_activity(
     db: Session,
     request_id: uuid.UUID,
-    actor_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
     action: str,
     summary: str,
     detail: dict | None = None,
@@ -182,7 +333,11 @@ def create_request(
     db: Session = Depends(get_db),
 ) -> RequestOut:
     _validate_commodity_group(db, payload.commodity_group_id)
+    _validate_catalog_articles(db, membership.organization_id, payload)
+    total_cost = _authoritative_total(payload)
+    _enforce_commodity_overrides(db, membership.organization_id, payload, total_cost)
     _enforce_required_fields(db, membership.organization_id, payload)
+    approval_status, approved_at = _approval_for_total(total_cost)
 
     # Vendor fields are already cleaned up during extraction, so we can persist
     # them directly here.
@@ -193,11 +348,15 @@ def create_request(
         vendor_name=payload.vendor_name,
         vat_id=payload.vat_id,
         commodity_group_id=payload.commodity_group_id,
-        total_cost=payload.total_cost,
+        total_cost=total_cost,
+        currency=payload.currency,
+        adjustments=[adjustment.model_dump(by_alias=True) for adjustment in payload.adjustments],
         department=payload.department,
         organization_id=membership.organization_id,
         created_by=membership.user_id,
         status="open",
+        approval_status=approval_status,
+        approved_at=approved_at,
     )
     request.order_lines = [
         OrderLine(
@@ -207,12 +366,21 @@ def create_request(
             unit=line.unit,
             total_price=line.total_price,
             line_order=index + 1,
+            catalog_article_id=line.catalog_article_id,
         )
         for index, line in enumerate(payload.order_lines)
     ]
     db.add(request)
     db.flush()
     _log_activity(db, request.id, membership.user_id, "created", "Request created")
+    if approval_status == "approved":
+        _log_activity(
+            db,
+            request.id,
+            None,
+            "auto_approved",
+            "Request auto-approved because it is below the approval threshold",
+        )
     db.commit()
 
     request = _get_org_request(db, request.id, membership.organization_id)
@@ -228,17 +396,31 @@ def update_request(
 ) -> RequestOut:
     request = _get_org_request(db, request_id, membership.organization_id)
     _validate_commodity_group(db, payload.commodity_group_id)
+    _validate_catalog_articles(db, membership.organization_id, payload)
+    total_cost = _authoritative_total(payload)
+    _enforce_commodity_overrides(db, membership.organization_id, payload, total_cost)
     _enforce_required_fields(db, membership.organization_id, payload)
 
     changed = _changed_fields(request, payload)
+    total_changed = not math.isclose(
+        float(request.total_cost or 0), total_cost, abs_tol=0.01
+    )
 
     request.requestor_name = payload.requestor_name
     request.title = payload.title
     request.vendor_name = payload.vendor_name
     request.vat_id = payload.vat_id
     request.commodity_group_id = payload.commodity_group_id
-    request.total_cost = payload.total_cost
+    request.total_cost = total_cost
+    request.currency = payload.currency
+    if "adjustments" in payload.model_fields_set:
+        request.adjustments = [
+            adjustment.model_dump(by_alias=True) for adjustment in payload.adjustments
+        ]
     request.department = payload.department
+    if total_changed and request.approval_status in {"pending", "approved"}:
+        request.approval_status, request.approved_at = _approval_for_total(total_cost)
+        request.approved_by = None
 
     # Replace order lines (same semantics as the original delete-and-insert).
     request.order_lines = [
@@ -249,6 +431,7 @@ def update_request(
             unit=line.unit,
             total_price=line.total_price,
             line_order=index + 1,
+            catalog_article_id=line.catalog_article_id,
         )
         for index, line in enumerate(payload.order_lines)
     ]

@@ -61,6 +61,8 @@ export type ProcurementRequest = {
   approved_by: string | null;
   approved_at: string | null;
   total_cost: number | null;
+  currency: string | null;
+  adjustments: Array<{ description: string; amount: number; lineType: string }>;
   created_at: string;
   updated_at: string;
 };
@@ -75,6 +77,7 @@ export type OrderLine = {
   total_price: number;
   line_order: number;
   created_at: string;
+  catalog_article_id: string | null;
 };
 
 // ============================================================================

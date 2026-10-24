@@ -49,19 +49,21 @@ def get_current_membership(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> OrganizationMember:
-    """The current user's organization membership. 403 if they have none.
-
-    Port of the ``organization_members`` lookup every server action performed.
-    """
-    membership = db.scalar(
-        select(OrganizationMember).where(OrganizationMember.user_id == user.id)
+    """Resolve the user's membership for the single-organization demo flow."""
+    memberships = list(
+        db.scalars(select(OrganizationMember).where(OrganizationMember.user_id == user.id))
     )
-    if membership is None:
+    if not memberships:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User is not part of any organization",
         )
-    return membership
+    if len(memberships) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Multiple organization memberships require an organization selector.",
+        )
+    return memberships[0]
 
 
 def require_org_admin(

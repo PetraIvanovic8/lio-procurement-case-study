@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # gpt-4o-mini keeps extraction snappy — latency matters on the upload flow,
     # and larger models were noticeably slower without a real quality gain.
     openai_model: str = "gpt-4o-mini"
+
+    # Requests below this amount do not require buyer approval.
+    auto_approval_threshold: float = Field(default=2000, ge=0)
 
     # CORS — NoDecode lets us accept a plain comma-separated string instead of
     # the JSON list pydantic-settings would otherwise demand from env vars.
